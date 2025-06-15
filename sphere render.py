@@ -9,6 +9,11 @@ import json
 # === CONFIGURATION ===
 path = "C:\\Users\\ginof\\photosphere\\photos\\"
 
+base_yaw_span  = 70  # degrees
+base_pitch_span   = 45
+
+sector_crop = 0.8
+
 # === GLOBALS ===
 camera_azimuth = 0.0
 camera_elevation = 0.0
@@ -19,15 +24,22 @@ sector_textures = []
 
 debug_active = True
 
-sector_crop = 0.7
-
 sector_data = []
 
+initial_yaw = 0.0
+initial_pitch = 0.0
+initial_roll = 0.0
+
 def load_imu_data():
-    global sector_data
+    global sector_data, initial_yaw, initial_pitch, initial_roll
     imu_path = path + "IMU_data.json"
     with open(imu_path, "r") as f:
-        sector_data = json.load(f)
+        sector_data = json.load(f) 
+
+    entry = sector_data[0]
+    initial_yaw = entry.get("yaw", 0.0)
+    initial_pitch = entry.get("pitch", 0.0)
+    initial_roll = entry.get("roll", 0.0)
 
 def load_texture_from_file(filepath):
     img = cv2.imread(filepath)
@@ -77,51 +89,67 @@ def print_debug_info():
     if debug_active:
         print(f"[DEBUG] Sectors Crop: {sector_crop:.2f}")
         print(f"[DEBUG] ")
+        
+def draw_textured_patch(texture_id, yaw_deg, pitch_deg, roll_deg, radius=2.0, yaw_span=30, pitch_span=20):
+    glBindTexture(GL_TEXTURE_2D, texture_id)
 
-def draw_curved_patch_on_sphere(radius, pitch_deg, yaw_deg, roll_deg, crop=0.2, resolution=16):
-    pitch = np.radians(pitch_deg)
-    yaw = np.radians(yaw_deg)
-    roll = np.radians(roll_deg)
+    # Convert angles to radians
+    yaw_rad = np.radians(yaw_deg)
+    pitch_rad = np.radians(pitch_deg)
+    roll_rad = np.radians(roll_deg)
+    yaw_span_rad = np.radians(yaw_span)
+    pitch_span_rad = np.radians(pitch_span)
 
-    # Compute central direction vector
-    center = np.array([
-        np.cos(pitch) * np.cos(yaw),
-        np.sin(pitch),
-        np.cos(pitch) * np.sin(yaw)
-    ])
+    # Compute patch center direction vector
+    cx = np.cos(pitch_rad) * np.sin(yaw_rad)
+    cy = np.sin(pitch_rad)
+    cz = -np.cos(pitch_rad) * np.cos(yaw_rad)
+    center = np.array([cx, cy, cz])
 
-    # Build local tangent space
-    up = np.array([0, 1, 0])
-    if np.allclose(center, up):
-        up = np.array([0, 0, 1])
-    right = np.cross(up, center)
-    right /= np.linalg.norm(right)
-    up = np.cross(center, right)
-    up /= np.linalg.norm(up)
+    # Build local coordinate axes for the patch
+    up = np.array([0.0, 1.0, 0.0])
+    right = np.cross(center, up)
+    if np.linalg.norm(right) < 1e-6:
+        right = np.array([1.0, 0.0, 0.0])
+    right = right / np.linalg.norm(right)
+    up = np.cross(right, center)
+    up = up / np.linalg.norm(up)
 
-    # Apply roll rotation to tangent basis
-    rot = np.array([
-        [np.cos(roll), -np.sin(roll)],
-        [np.sin(roll),  np.cos(roll)]
-    ])
+    # Apply roll around center axis
+    cos_r, sin_r = np.cos(roll_rad), np.sin(roll_rad)
+    up_rot = cos_r * up + sin_r * right
+    right_rot = -sin_r * up + cos_r * right
 
-    # Grid patch around center direction
-    glBegin(GL_QUADS)
-    for i in range(resolution):
-        for j in range(resolution):
-            for dx, dy in [(0,0), (1,0), (1,1), (0,1)]:
-                u = (i + dx) / resolution
-                v = (j + dy) / resolution
-                local = np.array([u - 0.5, v - 0.5]) * 2 * crop
-                local_rot = rot @ local
-                offset_dir = right * local_rot[0] + up * local_rot[1]
-                dir_vec = center + offset_dir
-                dir_vec /= np.linalg.norm(dir_vec)
-                glTexCoord2f(u, v)
-                glVertex3f(*(radius * dir_vec))
-    glEnd()
+    # Draw the patch
+    rows, cols = 20, 20
+    for i in range(rows):
+        v0 = i / rows
+        v1 = (i + 1) / rows
+        pitch0 = (v0 - 0.5) * pitch_span_rad
+        pitch1 = (v1 - 0.5) * pitch_span_rad
+        glBegin(GL_QUAD_STRIP)
+        for j in range(cols + 1):
+            u = j / cols
+            yaw_offset = (u - 0.5) * yaw_span_rad
+
+            for pitch_offset in [pitch0, pitch1]:
+                # Direction in local patch space
+                dir = (
+                    np.cos(pitch_offset) * np.sin(yaw_offset) * right_rot +
+                    np.sin(pitch_offset) * up_rot +
+                    -np.cos(pitch_offset) * np.cos(yaw_offset) * center
+                )
+                dir = dir / np.linalg.norm(dir)
+                pos = radius * dir
+                glTexCoord2f(u, (pitch_offset + pitch_span_rad / 2) / pitch_span_rad)
+                glVertex3f(*pos)
+        glEnd()
+
+    glBindTexture(GL_TEXTURE_2D, 0)
 
 def display():
+    global base_yaw_span , base_pitch_span 
+    
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glLoadIdentity()
 
@@ -129,16 +157,23 @@ def display():
     glRotatef(camera_azimuth, 0.0, 1.0, 0.0)
     gluLookAt(0, 0, 0, 0, 0, -1, 0, 1, 0)
 
-    for i, imu in enumerate(sector_data):
-        glBindTexture(GL_TEXTURE_2D, sector_textures[i])
-        draw_curved_patch_on_sphere(
-            radius=2.01,
-            pitch_deg=imu["pitch"],
-            yaw_deg=imu["yaw"],
-            roll_deg=imu["roll"],
-            crop=sector_crop
-        )
-    glBindTexture(GL_TEXTURE_2D, 0)
+    # Scale spans by sector_crop
+    scaled_yaw_span = base_yaw_span * sector_crop
+    scaled_pitch_span = base_pitch_span * sector_crop
+
+    for i, imu_entry in enumerate(sector_data):
+        if i >= len(sector_textures):
+            continue
+        texture_id = sector_textures[i]
+        yaw = float(imu_entry.get("yaw", 0.0))
+        pitch = float(imu_entry.get("pitch", 0.0))
+        pitch = max(min(pitch, 89), -89)  # Clamp pitch between -89 and 89 degrees          
+        roll = float(imu_entry.get("roll", 0.0))
+
+        draw_textured_patch(texture_id, yaw, pitch, roll,
+                            yaw_span=scaled_yaw_span,
+                            pitch_span=scaled_pitch_span)
+
     glutSwapBuffers()
 
 def mouse(button, state, x, y):
@@ -152,7 +187,7 @@ def mouse(button, state, x, y):
     elif button == 4:  # Scroll down
         sector_crop = max(sector_crop - 0.02, 0.3)
     elif button == 3:  # Scroll up
-        sector_crop = min(sector_crop + 0.02, 0.7)
+        sector_crop = min(sector_crop + 0.02, 0.8)
     
     print_debug_info();
 

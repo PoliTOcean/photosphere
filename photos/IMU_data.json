@@ -1,7 +1,7 @@
 [
-  { "yaw": 0, "pitch": -20, "roll": 0.0 },
-  { "yaw": 70, "pitch": -20, "roll": -3.5 },
-  { "yaw": 140, "pitch": -90, "roll": 2.2 },
-  { "yaw": 210, "pitch": -0, "roll": 40.8 },
-  { "yaw": 290, "pitch": -20, "roll": -0.9 }
+  { "yaw": 0, "pitch": -0, "roll": 0.0 },
+  { "yaw": 70, "pitch": -0, "roll": 0 },
+  { "yaw": 140, "pitch": -0, "roll": 0},
+  { "yaw": 210, "pitch": -0, "roll": 0 },
+  { "yaw": 290, "pitch": 0, "roll": 0 }
 ]
