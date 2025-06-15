@@ -15,18 +15,11 @@ camera_elevation = 0.0
 last_x, last_y = 0, 0
 mouse_down = False
 
-texture_north = None
-texture_south = None
 sector_textures = []
-
-north_rotation_angle = 0.0
-south_rotation_angle = 0.0
-
-equator_lat_extent = 70
 
 debug_active = True
 
-sector_crop = 1.0
+sector_crop = 0.7
 
 sector_data = []
 
@@ -57,9 +50,7 @@ def load_texture_from_file(filepath):
     return texture_id
 
 def load_textures():
-    global texture_north, texture_south, sector_textures
-    texture_north = load_texture_from_file(path + "north.jpg")
-    texture_south = load_texture_from_file(path + "south.jpg")
+    global sector_textures
 
     for i in range(len(sector_data)):
         tex_path = path + f"{i+1}.jpg"
@@ -151,7 +142,7 @@ def display():
     glutSwapBuffers()
 
 def mouse(button, state, x, y):
-    global mouse_down, last_x, last_y, sector_crop, pole_crop
+    global mouse_down, last_x, last_y, sector_crop
     if button == GLUT_LEFT_BUTTON:
         if state == GLUT_DOWN:
             mouse_down = True
@@ -159,18 +150,13 @@ def mouse(button, state, x, y):
         elif state == GLUT_UP:
             mouse_down = False
     elif button == 4:  # Scroll down
-        sector_crop = max(sector_crop - 0.02, 0.0)
-        pole_crop = min(pole_crop + 0.05, 1.0)
+        sector_crop = max(sector_crop - 0.02, 0.3)
     elif button == 3:  # Scroll up
-        sector_crop = min(sector_crop + 0.02, 0.49)
-        pole_crop = max(pole_crop - 0.05, 0.0)
+        sector_crop = min(sector_crop + 0.02, 0.7)
     
     print_debug_info();
 
 def keyboard(key, x, y):
-    global north_rotation_angle, south_rotation_angle
-    global equator_lat_extent
-
     if key == b'\x1b':  # ESC
         sys.exit(0)
     
