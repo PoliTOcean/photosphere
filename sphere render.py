@@ -4,11 +4,10 @@ from OpenGL.GL import *
 from OpenGL.GLUT import *
 from OpenGL.GLU import *
 import sys
+import json
 
 # === CONFIGURATION ===
-NUM_EQUATOR_SECTORS = 4
-
-path = "D:\\Produzioni e progetti\\PoliTOcean\\Sphere rendering\\photos\\"
+path = "C:\\Users\\ginof\\photosphere\\photos\\"
 
 # === GLOBALS ===
 camera_azimuth = 0.0
@@ -27,8 +26,15 @@ equator_lat_extent = 70
 
 debug_active = True
 
-sector_crop = 0.0
-pole_crop = 0.0
+sector_crop = 1.0
+
+sector_data = []
+
+def load_imu_data():
+    global sector_data
+    imu_path = path + "IMU_data.json"
+    with open(imu_path, "r") as f:
+        sector_data = json.load(f)
 
 def load_texture_from_file(filepath):
     img = cv2.imread(filepath)
@@ -55,8 +61,8 @@ def load_textures():
     texture_north = load_texture_from_file(path + "north.jpg")
     texture_south = load_texture_from_file(path + "south.jpg")
 
-    for i in range(NUM_EQUATOR_SECTORS):
-        tex_path = path + f"sector_{i+1}.jpg"
+    for i in range(len(sector_data)):
+        tex_path = path + f"{i+1}.jpg"
         sector_textures.append(load_texture_from_file(tex_path))
 
 def init():
@@ -78,95 +84,51 @@ def reshape(width, height):
 
 def print_debug_info():
     if debug_active:
-        print(f"[DEBUG] North Pole Rotation: {north_rotation_angle:.2f}°, South Pole Rotation: {south_rotation_angle:.2f}°")
-        print(f"[DEBUG] Poles Crop: {pole_crop:.2f}")
         print(f"[DEBUG] Sectors Crop: {sector_crop:.2f}")
-        print(f"[DEBUG] Sectors Max Latitude: {equator_lat_extent:.2f}")
         print(f"[DEBUG] ")
 
-def draw_sphere_sector(radius, slices, stacks, lat_min, lat_max, lon_min, lon_max):
-    lat_min_rad = np.radians(lat_min)
-    lat_max_rad = np.radians(lat_max)
-    lon_min_rad = np.radians(lon_min)
-    lon_max_rad = np.radians(lon_max)
+def draw_curved_patch_on_sphere(radius, pitch_deg, yaw_deg, roll_deg, crop=0.2, resolution=16):
+    pitch = np.radians(pitch_deg)
+    yaw = np.radians(yaw_deg)
+    roll = np.radians(roll_deg)
 
-    for i in range(stacks):
-        lat0 = lat_min_rad + (lat_max_rad - lat_min_rad) * i / stacks
-        lat1 = lat_min_rad + (lat_max_rad - lat_min_rad) * (i + 1) / stacks
-        y0 = np.sin(lat0)
-        y1 = np.sin(lat1)
-        r0 = np.cos(lat0)
-        r1 = np.cos(lat1)
+    # Compute central direction vector
+    center = np.array([
+        np.cos(pitch) * np.cos(yaw),
+        np.sin(pitch),
+        np.cos(pitch) * np.sin(yaw)
+    ])
 
-        glBegin(GL_QUAD_STRIP)
-        for j in range(slices + 1):
-            lng = lon_min_rad + (lon_max_rad - lon_min_rad) * j / slices
-            x = np.cos(lng)
-            z = np.sin(lng)
+    # Build local tangent space
+    up = np.array([0, 1, 0])
+    if np.allclose(center, up):
+        up = np.array([0, 0, 1])
+    right = np.cross(up, center)
+    right /= np.linalg.norm(right)
+    up = np.cross(center, right)
+    up /= np.linalg.norm(up)
 
-            u_min = sector_crop
-            u_max = 1.0 - sector_crop
-            u = u_min + (u_max - u_min) * j / slices
-            v0 = i / stacks
-            v1 = (i + 1) / stacks
+    # Apply roll rotation to tangent basis
+    rot = np.array([
+        [np.cos(roll), -np.sin(roll)],
+        [np.sin(roll),  np.cos(roll)]
+    ])
 
-            glTexCoord2f(u, v0)
-            glVertex3f(radius * r0 * x, radius * y0, radius * r0 * z)
-
-            glTexCoord2f(u, v1)
-            glVertex3f(radius * r1 * x, radius * y1, radius * r1 * z)
-        glEnd()
-
-def draw_partial_textured_sphere_sectorized(radius=2, slices=16, stacks=16):
-    lon_per_sector = 360.0 / NUM_EQUATOR_SECTORS
-    for i in range(NUM_EQUATOR_SECTORS):
-        lon_min = i * lon_per_sector - 180
-        lon_max = (i + 1) * lon_per_sector - 180
-        glBindTexture(GL_TEXTURE_2D, sector_textures[i])
-        draw_sphere_sector(radius, slices, stacks, -equator_lat_extent, equator_lat_extent, lon_min, lon_max)
-    glBindTexture(GL_TEXTURE_2D, 0)
-
-def draw_pole_cap(radius=2, slices=60, rings=30, north=True, texture_radius=0.5, rotation_angle_deg=0.0):
-    rotation_rad = np.radians(rotation_angle_deg)
-
-    for i in range(rings):
-        r0 = texture_radius * (i / rings)
-        r1 = texture_radius * ((i + 1) / rings)
-
-        theta0 = (np.pi / 2) * (1 - r0) if north else (-np.pi / 2) * (1 - r0)
-        theta1 = (np.pi / 2) * (1 - r1) if north else (-np.pi / 2) * (1 - r1)
-
-        y0 = radius * np.sin(theta0)
-        y1 = radius * np.sin(theta1)
-        rad0 = radius * np.cos(theta0)
-        rad1 = radius * np.cos(theta1)
-
-        glBegin(GL_QUAD_STRIP)
-        for j in range(slices + 1):
-            phi = 2 * np.pi * j / slices
-            x = np.cos(phi)
-            z = np.sin(phi)
-
-            uv_phi0 = phi + rotation_rad
-            uv_phi1 = phi + rotation_rad
-
-            crop_scale = pole_crop   # User-defined parameter
-
-            # Offset to center crop
-            offset = (1.0 - crop_scale) / 2.0
-
-            u0 = offset + crop_scale * (0.5 + 0.5 * np.cos(uv_phi0) * r0)
-            v0 = offset + crop_scale * (0.5 + 0.5 * np.sin(uv_phi0) * r0)
-
-            u1 = offset + crop_scale * (0.5 + 0.5 * np.cos(uv_phi1) * r1)
-            v1 = offset + crop_scale * (0.5 + 0.5 * np.sin(uv_phi1) * r1)
-
-            glTexCoord2f(u0, v0)
-            glVertex3f(rad0 * x, y0, rad0 * z)
-
-            glTexCoord2f(u1, v1)
-            glVertex3f(rad1 * x, y1, rad1 * z)
-        glEnd()
+    # Grid patch around center direction
+    glBegin(GL_QUADS)
+    for i in range(resolution):
+        for j in range(resolution):
+            for dx, dy in [(0,0), (1,0), (1,1), (0,1)]:
+                u = (i + dx) / resolution
+                v = (j + dy) / resolution
+                local = np.array([u - 0.5, v - 0.5]) * 2 * crop
+                local_rot = rot @ local
+                offset_dir = right * local_rot[0] + up * local_rot[1]
+                dir_vec = center + offset_dir
+                dir_vec /= np.linalg.norm(dir_vec)
+                glTexCoord2f(u, v)
+                glVertex3f(*(radius * dir_vec))
+    glEnd()
 
 def display():
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -176,19 +138,16 @@ def display():
     glRotatef(camera_azimuth, 0.0, 1.0, 0.0)
     gluLookAt(0, 0, 0, 0, 0, -1, 0, 1, 0)
 
-    draw_partial_textured_sphere_sectorized(radius=2, slices=16, stacks=16)
-
-    glBindTexture(GL_TEXTURE_2D, texture_north)
-    draw_pole_cap(radius=2.1, slices=60, rings=30, north=True,
-    texture_radius=1.0 * ((90 - equator_lat_extent) / 90),
-    rotation_angle_deg=north_rotation_angle)
-
-    glBindTexture(GL_TEXTURE_2D, texture_south)
-    draw_pole_cap(radius=2.1, slices=60, rings=30, north=False,
-    texture_radius=1.0 * ((90 - equator_lat_extent) / 90),
-    rotation_angle_deg=south_rotation_angle)
-
-
+    for i, imu in enumerate(sector_data):
+        glBindTexture(GL_TEXTURE_2D, sector_textures[i])
+        draw_curved_patch_on_sphere(
+            radius=2.01,
+            pitch_deg=imu["pitch"],
+            yaw_deg=imu["yaw"],
+            roll_deg=imu["roll"],
+            crop=sector_crop
+        )
+    glBindTexture(GL_TEXTURE_2D, 0)
     glutSwapBuffers()
 
 def mouse(button, state, x, y):
@@ -211,20 +170,8 @@ def mouse(button, state, x, y):
 def keyboard(key, x, y):
     global north_rotation_angle, south_rotation_angle
     global equator_lat_extent
-    
-    if key == b'q':
-        south_rotation_angle = (south_rotation_angle - 10) % 360
-    elif key == b'w':
-        south_rotation_angle = (south_rotation_angle + 10) % 360
-    elif key == b'e':
-        north_rotation_angle = (north_rotation_angle - 10) % 360
-    elif key == b'r':
-        north_rotation_angle = (north_rotation_angle + 10) % 360
-    elif key == b'-':
-        equator_lat_extent = max(10, equator_lat_extent - 5)
-    elif key == b'+':
-        equator_lat_extent = min(90, equator_lat_extent + 5)
-    elif key == b'\x1b':  # ESC
+
+    if key == b'\x1b':  # ESC
         sys.exit(0)
     
     print_debug_info();
@@ -243,7 +190,8 @@ def main():
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
     glutInitWindowSize(1600, 900)
     glutCreateWindow(b"360 Sphere Viewer")
-    init()
+    init()  
+    load_imu_data()
     load_textures()
     glutDisplayFunc(display)
     glutReshapeFunc(reshape)
