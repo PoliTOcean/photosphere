@@ -7,7 +7,7 @@ import sys
 import json
 
 # === CONFIGURATION ===
-path = "C:\\Users\\ginof\\photosphere\\photos\\"
+path = "photos/"  # Path to the folder containing the images and IMU data"
 
 base_yaw_span  = 70  # degrees
 base_pitch_span   = 45
