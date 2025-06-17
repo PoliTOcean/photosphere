@@ -171,6 +171,7 @@ def display():
         roll = float(imu_entry.get("roll", 0.0))
 
         draw_textured_patch(texture_id, yaw, pitch, roll,
+                            radius=2.0-i*0.01,
                             yaw_span=scaled_yaw_span,
                             pitch_span=scaled_pitch_span)
 

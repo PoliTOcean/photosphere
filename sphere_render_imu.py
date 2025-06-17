@@ -10,7 +10,7 @@ import piexif.helper
 import os # Added for directory listing
 
 # === CONFIGURATION ===
-path = "photos_imu_2/" # Reinstated path global
+path = "photos_imu/" # Reinstated path global
 
 base_yaw_span  = 80  # degrees (Modificato da 70 a 60)
 base_pitch_span   = 50
@@ -361,6 +361,7 @@ def display():
         print(f"[display] Drawing patch {i+1}/{len(sector_data)}: TexID={texture_id}, Yaw={yaw:.2f}, Pitch={pitch:.2f}, Roll={roll:.2f}, YawSpan={scaled_yaw_span:.2f}, PitchSpan={scaled_pitch_span:.2f}")
 
         draw_textured_patch(texture_id, yaw, pitch, roll,
+                            radius=2.0-i*0.01,
                             yaw_span=scaled_yaw_span,
                             pitch_span=scaled_pitch_span)
 
