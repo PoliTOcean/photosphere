@@ -10,7 +10,7 @@ camera_azimuth = 0.0   # Horizontal angle
 camera_elevation = 0.0 # Vertical angle
 last_x, last_y = 0, 0  # Last mouse position
 mouse_down = False   # Is the mouse button pressed?
-path = "D:\\Produzioni e progetti\\PoliTOcean\\Sphere rendering\\photos\\" #Replace with your images path
+path = "photos/" #Replace with your images path
 
 # Global texture IDs
 texture_eq = None
@@ -83,7 +83,7 @@ def reshape(width, height):
     glViewport(0, 0, width, height)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
-    gluPerspective(45, width / float(height), 0.1, 100.0)
+    gluPerspective(65, width / float(height), 0.1, 100.0)
     glMatrixMode(GL_MODELVIEW)
     glLoadIdentity()
     

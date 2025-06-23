@@ -12,10 +12,42 @@ import os # Added for directory listing
 # === CONFIGURATION ===
 path = "photos_imu/" # Reinstated path global
 
-base_yaw_span  = 80  # degrees (Modificato da 70 a 60)
-base_pitch_span   = 50
+# Resolution-specific settings
+RESOLUTION_SETTINGS = {
+    (1600, 1200): {
+        'yaw_span': 190,  # Much wider field of view for 1600x1200
+        'pitch_span': 150,
+        'fisheye_correction': True,
+        'camera_matrix': np.array([[800.0, 0, 800.0],
+                                  [0, 800.0, 600.0],
+                                  [0, 0, 1]], dtype=np.float32),
+        'distortion_coeffs': np.array([-0.3, 0.1, 0, 0], dtype=np.float32)  # k1, k2, p1, p2
+    },
+    'default': {
+        'yaw_span': 80,
+        'pitch_span': 50,
+        'fisheye_correction': False,
+        'camera_matrix': None,
+        'distortion_coeffs': None
+    }
+}
+
+# Fisheye correction parameters (configurable)
+FISHEYE_CONFIG = {
+    'enabled': True,  # Global enable/disable
+    'k1': -0.3,       # Barrel distortion coefficient
+    'k2': 0.1,        # Barrel distortion coefficient  
+    'k3': 0.0,        # Higher order coefficient
+    'k4': 0.0,        # Higher order coefficient
+    'alpha': 1.0,     # Free scaling parameter (0=all pixels, 1=no black pixels)
+    'new_camera_matrix_scale': 0.8,  # Scale factor for new camera matrix
+    'camera_matrix_config': None  # Will be populated by calibration file if available
+}
 
 sector_crop = 0.8
+
+# Circle mask radius for 1600x1200 display (in normalized [0,0.5], default 0.5 for inscribed circle)
+circle_mask_radius = 0.4  # Increase up to ~0.6 for a larger circle, but not >0.707
 
 # === GLOBALS ===
 camera_azimuth = 0.0
@@ -29,10 +61,74 @@ image_processing_queue = [] # New global list
 debug_active = True
 
 sector_data = []
+sector_settings = []  # New: Store settings per image
 
 initial_yaw = 0.0
 initial_pitch = 0.0
 initial_roll = 0.0
+
+def crop_to_largest_centered_circle(img):
+    """
+    Crop the input image to the largest possible centered circle and set outside pixels to black.
+    Args:
+        img: Input image (numpy array)
+    Returns:
+        Cropped image with outside pixels set to black (same shape as input)
+    """
+    h, w = img.shape[:2]
+    radius = min(w, h) // 2
+    cx, cy = w // 2, h // 2
+    Y, X = np.ogrid[:h, :w]
+    dist_from_center = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
+    mask = dist_from_center <= radius
+    output = np.zeros_like(img)
+    if img.ndim == 3:
+        for c in range(img.shape[2]):
+            output[..., c][mask] = img[..., c][mask]
+    else:
+        output[mask] = img[mask]
+    return output
+
+def load_calibration_parameters(resolution=None):
+    """
+    Load fisheye calibration parameters from the calibration tool's output file.
+    Only loads for 1600x1200 resolution.
+    """
+    global FISHEYE_CONFIG
+    if resolution != (1600, 1200):
+        print("Skipping fisheye calibration parameters for non-1600x1200 resolution.")
+        return False
+    calibration_file = 'fisheye_calibration_params.json'
+    if os.path.exists(calibration_file):
+        try:
+            with open(calibration_file, 'r') as f:
+                calibration_data = json.load(f)
+            if 'FISHEYE_CONFIG' in calibration_data:
+                calibrated_config = calibration_data['FISHEYE_CONFIG']
+                FISHEYE_CONFIG.update(calibrated_config)
+                if 'CAMERA_MATRIX_CONFIG' in calibration_data:
+                    FISHEYE_CONFIG['camera_matrix_config'] = calibration_data['CAMERA_MATRIX_CONFIG']
+                print(f"Loaded calibration parameters from {calibration_file}:")
+                print(f"  K1: {FISHEYE_CONFIG['k1']:.3f}")
+                print(f"  K2: {FISHEYE_CONFIG['k2']:.3f}")
+                print(f"  K3: {FISHEYE_CONFIG['k3']:.3f}")
+                print(f"  K4: {FISHEYE_CONFIG['k4']:.3f}")
+                print(f"  Alpha: {FISHEYE_CONFIG['alpha']:.3f}")
+                if 'camera_matrix_config' in FISHEYE_CONFIG:
+                    cam_config = FISHEYE_CONFIG['camera_matrix_config']
+                    print(f"  Camera Matrix: FX Scale={cam_config.get('fx_scale_percent', 50)}%, FY Scale={cam_config.get('fy_scale_percent', 50)}%")
+                return True
+            else:
+                print(f"Warning: No FISHEYE_CONFIG found in {calibration_file}")
+                return False
+        except Exception as e:
+            print(f"Error loading calibration parameters from {calibration_file}: {e}")
+            print("Using default parameters instead.")
+            return False
+    else:
+        print(f"No calibration file found at {calibration_file}")
+        print("Using default fisheye parameters. Run fisheye_calibration.py to create calibrated parameters.")
+        return False
 
 # Add the new function to read IMU data from image EXIF
 def read_imu_from_image(image_path):
@@ -90,16 +186,145 @@ def read_imu_from_image(image_path):
         print(f"An unexpected error occurred while reading EXIF from {image_path}: {e}")
         return None
 
+def undistort_fisheye_image(img, camera_matrix, dist_coeffs, alpha=1.0):
+    """
+    Correct fisheye distortion in an image.
+    
+    Args:
+        img: Input image (numpy array)
+        camera_matrix: Camera intrinsic matrix (3x3)
+        dist_coeffs: Distortion coefficients [k1, k2, p1, p2] or [k1, k2, k3, k4]
+        alpha: Free scaling parameter (0=all pixels visible, 1=no black pixels)
+    
+    Returns:
+        Undistorted image
+    """
+    h, w = img.shape[:2]
+    
+    # Get optimal new camera matrix
+    new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+        camera_matrix, dist_coeffs, (w, h), alpha, (w, h)
+    )
+    
+    # Undistort the image
+    undistorted = cv2.undistort(img, camera_matrix, dist_coeffs, None, new_camera_matrix)
+    
+    # Crop the image if ROI is valid
+    x, y, w_roi, h_roi = roi
+    if w_roi > 0 and h_roi > 0:
+        undistorted = undistorted[y:y+h_roi, x:x+w_roi]
+    
+    return undistorted
+
+def create_calibrated_camera_matrix(width, height):
+    """
+    Create camera matrix using calibrated parameters if available.
+    
+    Args:
+        width: Image width
+        height: Image height
+    
+    Returns:
+        Camera matrix (3x3 numpy array)
+    """
+    if 'camera_matrix_config' in FISHEYE_CONFIG:
+        cam_config = FISHEYE_CONFIG['camera_matrix_config']
+        fx_scale = cam_config.get('fx_scale_percent', 50) / 100.0
+        fy_scale = cam_config.get('fy_scale_percent', 50) / 100.0
+        
+        # Use calibrated scale factors
+        fx = width * fx_scale
+        fy = height * fy_scale
+        cx = width * 0.5
+        cy = height * 0.5
+        
+        camera_matrix = np.array([
+            [fx, 0, cx],
+            [0, fy, cy],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        
+        print(f"Created calibrated camera matrix: FX={fx:.1f}, FY={fy:.1f}, CX={cx:.1f}, CY={cy:.1f}")
+        return camera_matrix
+    else:
+        # Fallback to default method
+        fx = fy = min(width, height) * 0.5
+        cx, cy = width * 0.5, height * 0.5
+        
+        camera_matrix = np.array([
+            [fx, 0, cx],
+            [0, fy, cy],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        
+        print(f"Created default camera matrix: FX={fx:.1f}, FY={fy:.1f}, CX={cx:.1f}, CY={cy:.1f}")
+        return camera_matrix
+
+def get_resolution_settings(width, height):
+    """
+    Get appropriate settings based on image resolution.
+    Only enable fisheye correction and calibration for 1600x1200.
+    """
+    resolution_key = (width, height)
+    if resolution_key == (1600, 1200):
+        settings = RESOLUTION_SETTINGS[resolution_key].copy()
+        print(f"Using specific settings for resolution {width}x{height}")
+        # Load calibration only for 1600x1200
+        load_calibration_parameters(resolution=resolution_key)
+        if settings['fisheye_correction'] and FISHEYE_CONFIG['enabled']:
+            settings['distortion_coeffs'] = np.array([
+                FISHEYE_CONFIG['k1'], FISHEYE_CONFIG['k2'], 
+                FISHEYE_CONFIG['k3'], FISHEYE_CONFIG['k4']
+            ], dtype=np.float32)
+            settings['camera_matrix'] = create_calibrated_camera_matrix(width, height)
+            print(f"Applied fisheye correction with K1={FISHEYE_CONFIG['k1']:.3f}, K2={FISHEYE_CONFIG['k2']:.3f}")
+        return settings
+    else:
+        print(f"Using default settings for resolution {width}x{height}")
+        default_settings = RESOLUTION_SETTINGS['default'].copy()
+        # Do NOT enable fisheye correction or calibration for other resolutions
+        default_settings['fisheye_correction'] = False
+        default_settings['distortion_coeffs'] = None
+        default_settings['camera_matrix'] = None
+        return default_settings
+
 def load_texture_from_file(filepath):
     print(f"  [load_texture] Attempting cv2.imread for {filepath}")
     img = cv2.imread(filepath)
     print(f"  [load_texture] cv2.imread status for {filepath}: {'OK' if img is not None else 'Failed - img is None'}")
     if img is None:
         print(f"Failed to load image at {filepath}")
-        # Consider not exiting immediately to see if other files load,
-        # or handle this more gracefully depending on requirements.
-        # For now, keeping sys.exit(1) as per original logic for critical failure.
         sys.exit(1)
+
+    # Get image dimensions before any processing
+    original_h, original_w = img.shape[:2]
+    print(f"  [load_texture] Original image dimensions for {filepath}: w={original_w}, h={original_h}")
+    
+    # Get resolution-specific settings
+    settings = get_resolution_settings(original_w, original_h)
+    
+    # Apply fisheye correction if enabled
+    if settings['fisheye_correction'] and FISHEYE_CONFIG['enabled']:
+        print(f"  [load_texture] Applying fisheye correction for {filepath}")
+        try:
+            img = undistort_fisheye_image(
+                img, 
+                settings['camera_matrix'], 
+                settings['distortion_coeffs'], 
+                FISHEYE_CONFIG['alpha']
+            )
+            print(f"  [load_texture] Fisheye correction applied successfully for {filepath}")
+        except Exception as e:
+            print(f"  [load_texture] Warning: Fisheye correction failed for {filepath}: {e}")
+            print(f"  [load_texture] Continuing with original image...")
+
+    # Crop to largest centered circle for 1600x1200 images (after fisheye correction)
+    h, w = img.shape[:2]
+    print("wioddt:", w, "h:", h)
+    if w < 1100:
+        print(f"  [load_texture] Cropping to largest centered circle for {filepath}")
+        img = crop_to_largest_centered_circle(img)
+        print(f"  [load_texture] Cropping to circle complete for {filepath}")
 
     print(f"  [load_texture] Attempting cv2.flip for {filepath}")
     img = cv2.flip(img, 0)
@@ -114,9 +339,12 @@ def load_texture_from_file(filepath):
     print(f"  [load_texture] np.ascontiguousarray successful for {filepath}")
 
     h, w, channels = img.shape
-    print(f"  [load_texture] Image dimensions for {filepath}: w={w}, h={h}, channels={channels}")
+    print(f"  [load_texture] Final image dimensions for {filepath}: w={w}, h={h}, channels={channels}")
 
-    print(f"  [load_texture] Attempting glPixelStorei for {filepath}")
+    # Store settings for this image (could be used later if needed per-image settings)
+    # For now, we'll update global settings based on the first image processed
+    
+    # ...existing OpenGL texture creation code...
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
     print(f"  [load_texture] glPixelStorei successful for {filepath}")
 
@@ -148,7 +376,7 @@ def load_texture_from_file(filepath):
     glBindTexture(GL_TEXTURE_2D, 0)
     print(f"  [load_texture] glBindTexture(0) successful for {filepath}")
 
-    return texture_id
+    return texture_id, settings
 
 # Modified: This function now collects image paths and IMU data from the 'path' directory.
 # It does not perform OpenGL operations.
@@ -213,9 +441,11 @@ def collect_image_paths_and_imu():
 # New function to perform OpenGL texture loading and finalize data
 def finalize_texture_loading():
     global sector_textures, sector_data, initial_yaw, initial_pitch, initial_roll, image_processing_queue
+    global sector_settings
 
     sector_textures = []
     sector_data = []
+    sector_settings = []  # Initialize per-image settings
     first_image = True
 
     print("Starting final texture loading and data setup...")
@@ -227,14 +457,17 @@ def finalize_texture_loading():
         sector_data.append(imu_data) # Add IMU data
         
         print(f"  Attempting to load texture for {image_path}...")
-        texture_id = load_texture_from_file(image_path) # This now happens after GL context is ready
+        texture_id, settings = load_texture_from_file(image_path) # Now returns settings too
         sector_textures.append(texture_id)
+        sector_settings.append(settings)  # Store settings per image
         print(f"  Finished loading texture for {image_path}. Texture ID: {texture_id}")
+        print(f"  Settings for this image: Yaw span={settings['yaw_span']}, Pitch span={settings['pitch_span']}")
 
         if first_image:
             initial_yaw = float(imu_data.get("yaw", 0.0))
             initial_pitch = float(imu_data.get("pitch", 0.0))
             initial_roll = float(imu_data.get("roll", 0.0))
+            
             print(f"Initial orientation set from {image_path}: Yaw={initial_yaw}, Pitch={initial_pitch}, Roll={initial_roll}")
             first_image = False
             
@@ -257,7 +490,7 @@ def reshape(width, height):
     glViewport(0, 0, width, height)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
-    gluPerspective(45, width / float(height), 0.1, 100.0)
+    gluPerspective(40, width / float(height), 0.1, 100.0)
     glMatrixMode(GL_MODELVIEW)
     glLoadIdentity()
 
@@ -266,7 +499,7 @@ def print_debug_info():
         print(f"[DEBUG] Sectors Crop: {sector_crop:.2f}")
         print(f"[DEBUG] ")
         
-def draw_textured_patch(texture_id, yaw_deg, pitch_deg, roll_deg, radius=2.0, yaw_span=30, pitch_span=20):
+def draw_textured_patch(texture_id, yaw_deg, pitch_deg, roll_deg, radius=2.0, yaw_span=30, pitch_span=20, image_shape=None):
     glBindTexture(GL_TEXTURE_2D, texture_id)
 
     # Convert angles to radians
@@ -298,6 +531,12 @@ def draw_textured_patch(texture_id, yaw_deg, pitch_deg, roll_deg, radius=2.0, ya
 
     # Draw the patch
     rows, cols = 20, 20
+    # Determine if we need to apply a circular mask (only for 1600x1200)
+    apply_circle_mask = False
+    mask_r = 0.0
+    if image_shape is not None and image_shape[1] == 1600 and image_shape[0] == 1200:
+        apply_circle_mask = True
+        mask_r = circle_mask_radius  # Use configurable parameter
     for i in range(rows):
         v0 = i / rows
         v1 = (i + 1) / rows
@@ -307,14 +546,19 @@ def draw_textured_patch(texture_id, yaw_deg, pitch_deg, roll_deg, radius=2.0, ya
         for j in range(cols + 1):
             u = j / cols
             yaw_offset = (u - 0.5) * yaw_span_rad
-
-            for pitch_offset in [pitch0, pitch1]:
+            for v, pitch_offset in zip([v0, v1], [pitch0, pitch1]):
+                # Apply circular mask in texture space for 1600x1200
+                if apply_circle_mask:
+                    du = u - 0.5
+                    dv = v - 0.5
+                    if du * du + dv * dv > mask_r * mask_r:
+                        continue
                 # Direction in local patch space
                 # Corrected the sign of the center component
                 dir = (
                     np.cos(pitch_offset) * np.sin(yaw_offset) * right_rot +
                     np.sin(pitch_offset) * up_rot +
-                    np.cos(pitch_offset) * np.cos(yaw_offset) * center # Changed sign here from - to +
+                    np.cos(pitch_offset) * np.cos(yaw_offset) * center
                 )
                 dir = dir / np.linalg.norm(dir)
                 pos = radius * dir
@@ -325,48 +569,48 @@ def draw_textured_patch(texture_id, yaw_deg, pitch_deg, roll_deg, radius=2.0, ya
     glBindTexture(GL_TEXTURE_2D, 0)
 
 def display():
-    global base_yaw_span , base_pitch_span 
-    
-    print("[display] Display function called.") # Unconditional print
+    #print("[display] Display function called.") # Unconditional print
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glLoadIdentity()
 
     glRotatef(camera_elevation, 1.0, 0.0, 0.0)
     glRotatef(camera_azimuth, 0.0, 1.0, 0.0)
-    print(f"[display] Camera Azimuth: {camera_azimuth:.2f}, Elevation: {camera_elevation:.2f}")
+    #print(f"[display] Camera Azimuth: {camera_azimuth:.2f}, Elevation: {camera_elevation:.2f}")
     gluLookAt(0, 0, 0, 0, 0, -1, 0, 1, 0)
 
-    # Scale spans by sector_crop
-    scaled_yaw_span = base_yaw_span * sector_crop
-    scaled_pitch_span = base_pitch_span * sector_crop
-    print(f"[display] Sector crop: {sector_crop:.2f}, Scaled Yaw Span: {scaled_yaw_span:.2f}, Scaled Pitch Span: {scaled_pitch_span:.2f}")
-
-    if not sector_data:
-        print("[display] No sector data to draw.")
-    else:
-        print(f"[display] Attempting to draw {len(sector_data)} sectors.")
-
     for i, imu_entry in enumerate(sector_data):
-        if i >= len(sector_textures):
-            print(f"[display] Error: Skipping sector {i}, no corresponding texture. Sector data len: {len(sector_data)}, Sector textures len: {len(sector_textures)}")
+        if i >= len(sector_textures) or i >= len(sector_settings):
+            #print(f"[display] Error: Skipping sector {i}, missing texture or settings.")
             continue
+            
         texture_id = sector_textures[i]
+        settings = sector_settings[i]  # Get settings for this specific image
+        
+        # Use per-image settings instead of global ones
+        scaled_yaw_span = settings['yaw_span'] * sector_crop
+        scaled_pitch_span = settings['pitch_span'] * sector_crop
         
         yaw = float(imu_entry.get("yaw", 0.0))
         pitch = float(imu_entry.get("pitch", 0.0))
         pitch = max(min(pitch, 89), -89)  # Clamp pitch between -89 and 89 degrees          
         roll = float(imu_entry.get("roll", 0.0))
 
-        print(f"[display] Drawing patch {i+1}/{len(sector_data)}: TexID={texture_id}, Yaw={yaw:.2f}, Pitch={pitch:.2f}, Roll={roll:.2f}, YawSpan={scaled_yaw_span:.2f}, PitchSpan={scaled_pitch_span:.2f}")
+        #print(f"[display] Drawing patch {i+1}/{len(sector_data)}: TexID={texture_id}, Yaw={yaw:.2f}, Pitch={pitch:.2f}, Roll={roll:.2f}, YawSpan={scaled_yaw_span:.2f}, PitchSpan={scaled_pitch_span:.2f}")
 
+        # Pass image shape for masking
+        image_shape = None
+        if settings.get('camera_matrix') is not None:
+            # Only 1600x1200 will have camera_matrix set
+            image_shape = (1200, 1600, 3)
         draw_textured_patch(texture_id, yaw, pitch, roll,
                             radius=2.0-i*0.01,
                             yaw_span=scaled_yaw_span,
-                            pitch_span=scaled_pitch_span)
+                            pitch_span=scaled_pitch_span,
+                            image_shape=image_shape)
 
     glutSwapBuffers()
-    print("[display] SwapBuffers called.") # Confirm end of display function
+    #print("[display] SwapBuffers called.") # Confirm end of display function
 
 def mouse(button, state, x, y):
     global mouse_down, last_x, last_y, sector_crop
@@ -399,8 +643,9 @@ def motion(x, y):
         last_x, last_y = x, y
 
 def main():
-    # Step 1: Collect image paths and IMU data (no OpenGL calls here)
-    # Image paths are now collected from the 'path' directory.
+    print("=== 360 Sphere Viewer with IMU ===")
+    # Do not load calibration globally here, only per-image in get_resolution_settings
+    print()
     collect_image_paths_and_imu() 
 
     # Step 2: Initialize GLUT and create the OpenGL window (and context)
@@ -432,3 +677,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

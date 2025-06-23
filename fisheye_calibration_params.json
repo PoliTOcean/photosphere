@@ -1,0 +1,22 @@
+{
+    "FISHEYE_CONFIG": {
+        "enabled": true,
+        "k1": 0.0,
+        "k2": 0.0,
+        "k3": 0.0,
+        "k4": 0.0,
+        "alpha": 1.0,
+        "new_camera_matrix_scale": 0.8
+    },
+    "CAMERA_MATRIX_CONFIG": {
+        "fx_scale_percent": 100,
+        "fy_scale_percent": 100,
+        "use_calibrated_matrix": true,
+        "auto_focal_length": true
+    },
+    "RESOLUTION_OVERRIDES": {
+        "apply_to_all_resolutions": true,
+        "preserve_aspect_ratio": true
+    },
+    "NOTE": "Use these parameters in your main script FISHEYE_CONFIG section"
+}
